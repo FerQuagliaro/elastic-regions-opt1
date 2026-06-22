@@ -99,15 +99,23 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .cpin:hover{background:rgba(37,99,235,.85);border-color:rgba(255,255,255,.35);transform:translate(-50%,-50%) scale(1.18)}
 .cpin-label{position:absolute;top:17px;left:0;transform:translateX(-50%);white-space:nowrap;
   font-size:9.5px;color:rgba(40,55,80,.85);font-weight:600;font-family:inherit;pointer-events:none;
-  text-shadow:0 0 5px rgba(238,241,247,.9),0 0 5px rgba(238,241,247,.9),0 0 3px rgba(238,241,247,1)}
+  background:rgba(255,255,255,0.82);border-radius:4px;padding:1px 5px;
+  opacity:0;transition:opacity .15s}
+.cpin-wrap:hover .cpin-label{opacity:1}
 @keyframes cpinIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.3)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
 @keyframes svgPinIn{from{opacity:0}to{opacity:1}}
-.pin-g .pin-lbl{opacity:0;transition:opacity .18s}
+.pin-g.pin-active .pin-shape{stroke:rgba(255,255,255,0.8)!important;stroke-width:0.9!important}
+.pin-g .pin-lbl{opacity:0;transition:opacity .15s}
 .pin-g:hover .pin-lbl,.pin-g.pin-active .pin-lbl{opacity:1}
 #back-btn{position:absolute;top:12px;left:12px;display:none;background:#fff;border:1px solid #ddd;
   border-radius:8px;padding:6px 14px;font-size:13px;font-weight:600;color:#333;cursor:pointer;
   box-shadow:0 2px 8px rgba(0,0,0,.12);z-index:10;font-family:inherit}
 #back-btn:hover{background:#f5f5f5}
+#map-legend{position:absolute;bottom:52px;left:12px;background:rgba(255,255,255,0.92);border:1px solid rgba(0,0,0,0.07);border-radius:10px;padding:8px 11px;font-size:11px;color:#2d3748;font-family:inherit;pointer-events:none;z-index:10;backdrop-filter:blur(6px);box-shadow:0 2px 8px rgba(0,0,0,0.08);line-height:1}
+.leg-row{display:flex;align-items:center;gap:6px;padding:2.5px 0}
+.leg-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.leg-sep{border-top:1px solid rgba(0,0,0,0.08);margin:4px 0}
+.leg-lam{font-size:11px;font-weight:700;width:8px;text-align:center;color:#6b7ea8}
 </style>
 </head>
 <body>
@@ -139,6 +147,13 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
         <g id="markers"></g>
       </g>
     </svg>
+    <div id="map-legend">
+      <div class="leg-row"><span class="leg-dot" style="background:#FF9900"></span>Amazon Web Services</div>
+      <div class="leg-row"><span class="leg-dot" style="background:#34A853"></span>Google Cloud</div>
+      <div class="leg-row"><span class="leg-dot" style="background:#0078D4"></span>Microsoft Azure</div>
+      <div class="leg-sep"></div>
+      <div class="leg-row"><span class="leg-lam">λ</span>Serverless</div>
+    </div>
     <div id="cluster-layer"></div>
     <button id="back-btn">← Back</button>
     <div class="tip" id="tip"></div>
@@ -217,8 +232,8 @@ const CLUSTERS=[
 ];
 const SHORT={aws:'AWS',gcp:'GCP',azure:'Az'};
 let expandedCluster=null;
-let groupOf={};     /* regionId → array of region objects that overlap this pin */
-let renderPos={};   /* regionId → [mx, my] spread offset for overlapping pins */
+let groupOf={};     /* key → array of {r,p,key} entries that overlap this pin */
+let renderPos={};   /* key → [mx, my] spread offset for overlapping pins */
 
 /* ── View state ── */
 const VW=800,VH=500;
@@ -232,7 +247,7 @@ let curTx=0,curTy=0,curSc=1,tgtTx=0,tgtTy=0,tgtSc=1,animRaf=null;
 let activeTab='global',activeRegion=null,showSL=true,showHosted=true;
 let dragStart=null,dragTxO,dragTyO,wasDragging=false;
 let stickyTip=null;
-let _pinClicked=false;
+let _pinClicked=false;let _lastClickMs=0;
 
 const svg=document.getElementById('map-svg');
 const worldG=document.getElementById('world-g');
@@ -350,167 +365,148 @@ function collapseToGlobal(){
 
 function setActivePinClass(rid){
   marksG.querySelectorAll('.pin-active').forEach(el=>el.classList.remove('pin-active'));
-  if(rid){const el=marksG.querySelector('[data-rid="'+rid+'"]');if(el)el.classList.add('pin-active');}
+  if(rid){
+    const el=marksG.querySelector('[data-rid="'+rid+'"]');
+    if(el){el.classList.add('pin-active');marksG.appendChild(el);} // move to end = renders on top
+  }
 }
-function makeMarker(r){
+function makeMarker(r,p,key){
   const _base=project([r.lng,r.lat]);
-  const[mx,my]=renderPos[r.id]||_base;
+  const[mx,my]=renderPos[key]||_base;
   const ns='http://www.w3.org/2000/svg';
   const g=document.createElementNS(ns,'g');
   g.setAttribute('transform','translate('+mx.toFixed(2)+','+my.toFixed(2)+')');
-  g.setAttribute('class','pin-g');g.setAttribute('data-rid',r.id);
+  g.setAttribute('class','pin-g');g.setAttribute('data-rid',key);
   g.setAttribute('tabindex','0');g.setAttribute('role','button');
-  g.setAttribute('aria-label',r.name);g.style.cursor='pointer';g.style.outline='none';
+  g.setAttribute('aria-label',r.name+' ('+PROVIDERS[p].short+')');g.style.cursor='pointer';g.style.outline='none';
   g.setAttribute('pointer-events','all');
   /* ── teardrop: circle r=7 center(0,-11), tip at (0,0) ── */
-  const mainColor=r.sl?PROVIDERS[r.p[0]].slColor:PROVIDERS[r.p[0]].color;
-  const strokeColor=PROVIDERS[r.p[0]].color;
-  /* shadow rect behind pin */
+  const mainColor=r.sl?PROVIDERS[p].slColor:PROVIDERS[p].color;
+  const strokeColor=PROVIDERS[p].color;
+  /* shadow */
   const shad=document.createElementNS(ns,'ellipse');
-  shad.setAttribute('cx','0');shad.setAttribute('cy','0.5');shad.setAttribute('rx','4');shad.setAttribute('ry','1.5');
-  shad.setAttribute('fill','rgba(0,0,0,0.22)');shad.setAttribute('pointer-events','none');
+  shad.setAttribute('cx','0');shad.setAttribute('cy','0.5');shad.setAttribute('rx','2');shad.setAttribute('ry','0.8');
+  shad.setAttribute('fill','rgba(0,0,0,0.18)');shad.setAttribute('pointer-events','none');
   g.appendChild(shad);
-  /* teardrop body: r=7, center (0,-11) */
+  /* teardrop: r=3.5, center(0,-6) — compact, clean */
   const shape=document.createElementNS(ns,'path');
-  shape.setAttribute('d','M0,0 L-5,-5.3 A7,7 0 1,1 5,-5.3Z');
-  shape.setAttribute('fill',r.p.length===1?mainColor:'#f4f5f7');
-  shape.setAttribute('stroke',strokeColor);shape.setAttribute('stroke-width','1.2');
+  shape.setAttribute('d','M0,0 L-2.8,-2.0 A3.5,3.5 0 1,1 2.8,-2.0Z');
+  shape.setAttribute('class','pin-shape');
+  shape.setAttribute('fill',mainColor);
+  shape.setAttribute('stroke',strokeColor);shape.setAttribute('stroke-width','0.6');
   shape.setAttribute('stroke-linejoin','round');shape.setAttribute('pointer-events','none');
-  shape.setAttribute('filter','drop-shadow(0 2px 4px rgba(0,0,0,0.28))');
+  shape.setAttribute('filter','drop-shadow(0 1px 2px rgba(0,0,0,0.2))');
   g.appendChild(shape);
-  if(r.p.length===1){
-    /* gloss */
-    const gloss=document.createElementNS(ns,'circle');
-    gloss.setAttribute('cx','-2');gloss.setAttribute('cy','-13.5');gloss.setAttribute('r','2');
-    gloss.setAttribute('fill','rgba(255,255,255,0.38)');gloss.setAttribute('pointer-events','none');
-    g.appendChild(gloss);
-    /* serverless: subtle outer glow ring */
-    if(r.sl){
-      const ring=document.createElementNS(ns,'circle');
-      ring.setAttribute('cx','0');ring.setAttribute('cy','-11');ring.setAttribute('r','9.5');
-      ring.setAttribute('fill','none');ring.setAttribute('stroke',strokeColor);
-      ring.setAttribute('stroke-width','1.2');ring.setAttribute('opacity','0.3');
-      ring.setAttribute('pointer-events','none');
-      g.appendChild(ring);
-    }
-  } else {
-    /* pie sectors: R2=5, CY=-11 */
-    const R2=5,CY=-11;
-    const step=360/r.p.length;
-    r.p.forEach((p,i)=>{
-      const a0=(i*step-90)*Math.PI/180,a1=((i+1)*step-90)*Math.PI/180;
-      const x1=(Math.cos(a0)*R2).toFixed(3),y1=(CY+Math.sin(a0)*R2).toFixed(3);
-      const x2=(Math.cos(a1)*R2).toFixed(3),y2=(CY+Math.sin(a1)*R2).toFixed(3);
-      const sec=document.createElementNS(ns,'path');
-      sec.setAttribute('d','M0,'+CY+' L'+x1+','+y1+' A'+R2+','+R2+' 0 '+((step>180)?1:0)+',1 '+x2+','+y2+' Z');
-      sec.setAttribute('fill',PROVIDERS[p].color);sec.setAttribute('pointer-events','none');
-      g.appendChild(sec);
-    });
-    const border=document.createElementNS(ns,'circle');
-    border.setAttribute('cx','0');border.setAttribute('cy',String(CY));border.setAttribute('r',String(R2));
-    border.setAttribute('fill','none');border.setAttribute('stroke','rgba(255,255,255,0.7)');
-    border.setAttribute('stroke-width','1');border.setAttribute('pointer-events','none');
-    g.appendChild(border);
-  }
-  /* label — visible on hover + active via CSS */
-  const lblText=PROVIDERS[r.p[0]].short+(r.sl?' λ':'');
-  const lw=Math.max(16,lblText.length*4.6+10),lh=7.5;
-  const lg=document.createElementNS(ns,'g');
-  lg.setAttribute('class','pin-lbl');
+  /* label — subtle pill, hover/active only */
+  const lblText=PROVIDERS[p].short+(r.sl?' λ':'');
+  const fs=2.9, lh=4.8, lpad=3.5;
+  const lw=Math.max(10, lblText.length*fs*0.6+lpad*2);
+  const ly=-6-3.5-lh+0.5;
+  const lbl=document.createElementNS(ns,'g');
+  lbl.setAttribute('class','pin-lbl');
+  lbl.setAttribute('pointer-events','none');
   const lbg=document.createElementNS(ns,'rect');
-  lbg.setAttribute('x',String(-lw/2));lbg.setAttribute('y',String(-11-7-lh-3));
+  lbg.setAttribute('x',String(-lw/2));lbg.setAttribute('y',String(ly));
   lbg.setAttribute('width',String(lw));lbg.setAttribute('height',String(lh));
-  lbg.setAttribute('rx','3.5');lbg.setAttribute('fill','#0d1520');lbg.setAttribute('opacity','0.92');
-  lg.appendChild(lbg);
+  lbg.setAttribute('rx','2.4');
+  lbg.setAttribute('fill','rgba(8,18,36,0.40)');
+  lbg.setAttribute('stroke','rgba(255,255,255,0.18)');lbg.setAttribute('stroke-width','0.4');
+  lbl.appendChild(lbg);
   const lbt=document.createElementNS(ns,'text');
-  lbt.setAttribute('x','0');lbt.setAttribute('y',String(-11-7-lh/2-3));
+  lbt.setAttribute('x','0');lbt.setAttribute('y',String(ly+lh/2));
   lbt.setAttribute('text-anchor','middle');lbt.setAttribute('dominant-baseline','middle');
-  lbt.setAttribute('fill','#e8ecf2');lbt.setAttribute('font-size','4.5');
-  lbt.setAttribute('font-family','system-ui,sans-serif');lbt.setAttribute('font-weight','700');
-  lbt.setAttribute('letter-spacing','0.5');
+  lbt.setAttribute('fill','rgba(225,235,250,0.92)');lbt.setAttribute('font-size',String(fs));
+  lbt.setAttribute('font-family','system-ui,sans-serif');lbt.setAttribute('font-weight','500');
+  lbt.setAttribute('letter-spacing','0.2');
   lbt.textContent=lblText;
-  lg.appendChild(lbt);
-  g.appendChild(lg);
-  /* hit area — larger invisible circle, pointer-events:all */
+  lbl.appendChild(lbt);
+  g.appendChild(lbl);
+
+
+
+  /* serverless: tiny λ inside the pin body */
+  if(r.sl){
+    const slMark=document.createElementNS(ns,'text');
+    slMark.setAttribute('x','0');slMark.setAttribute('y','-5.8');
+    slMark.setAttribute('text-anchor','middle');slMark.setAttribute('dominant-baseline','middle');
+    slMark.setAttribute('fill','rgba(255,255,255,0.72)');slMark.setAttribute('font-size','2.8');
+    slMark.setAttribute('font-family','system-ui,sans-serif');slMark.setAttribute('font-weight','700');
+    slMark.setAttribute('pointer-events','none');
+    slMark.textContent='λ';
+    g.appendChild(slMark);
+  }
+  /* hit area — invisible circle, pointer-events:all */
   const hit=document.createElementNS(ns,'circle');
-  hit.setAttribute('cx','0');hit.setAttribute('cy','-7');hit.setAttribute('r','14');
+  hit.setAttribute('cx','0');hit.setAttribute('cy','-3');hit.setAttribute('r','5');
   hit.setAttribute('fill','rgba(0,0,0,0.001)');hit.setAttribute('pointer-events','all');
   g.appendChild(hit);
-  /* click on g catches any sub-element click (shape, gloss, shadow, hit) */
+  /* click on g */
   g.addEventListener('click',e=>{
-    e.stopPropagation();_pinClicked=true;
-    const grp=groupOf[r.id];
-    if(grp&&stickyTip&&grp.some(gr=>gr.id===stickyTip)){
-      const ci=grp.findIndex(gr=>gr.id===stickyTip);
-      const nxt=grp[(ci+1)%grp.length];
-      showTip(e,nxt);stickyTip=nxt.id;makeTipSticky();setActivePinClass(nxt.id);return;
-    }
-    if(stickyTip===r.id){hideTip();stickyTip=null;activeRegion=null;renderSidebar();setActivePinClass(null);return;}
-    showTip(e,r);stickyTip=r.id;makeTipSticky();setActivePinClass(r.id);
+    e.stopPropagation();
+    const _now=Date.now();if(_now-_lastClickMs<350)return;_lastClickMs=_now;
+    _pinClicked=true;
+    if(stickyTip===key){hideTip();stickyTip=null;activeRegion=null;renderSidebar();setActivePinClass(null);return;}
+    showTip(e,r,p);stickyTip=key;makeTipSticky();setActivePinClass(key);
     activeRegion=r.id;renderSidebar();
   });
-  hit.addEventListener('mouseenter',e=>{if(stickyTip!==r.id)showTip(e,r);});
-  hit.addEventListener('mouseleave',()=>{if(stickyTip!==r.id)hideTip();});
-  g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();zoomTo(r,mx,my);}});
+  hit.addEventListener('mouseenter',e=>{if(stickyTip!==key)showTip(e,r,p);});
+  hit.addEventListener('mouseleave',()=>{if(stickyTip!==key)hideTip();});
+  g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();moveTo(VW/2-mx*4.5,VH/2-my*4.5,4.5,true);}});
   return g;
 }
-function computeOverlaps(regions){
-  const THRESH=10,SPREAD=7;
+function computeOverlaps(entries){
+  /* Group only by REGION ID — same lat/lng gets a small radial spread.
+     Geographically distinct regions stay at their geographic positions. */
+  const SPREAD=5;
   groupOf={};renderPos={};
-  const visited=new Set();
-  regions.forEach((r,i)=>{
-    if(visited.has(r.id))return;
-    const[mx,my]=project([r.lng,r.lat]);
-    const grp=[r];visited.add(r.id);
-    regions.forEach((r2,j)=>{
-      if(i===j||visited.has(r2.id))return;
-      const[mx2,my2]=project([r2.lng,r2.lat]);
-      if(Math.sqrt((mx-mx2)**2+(my-my2)**2)<THRESH){grp.push(r2);visited.add(r2.id);}
+  const byRegion={};
+  entries.forEach(e=>{
+    if(!byRegion[e.r.id])byRegion[e.r.id]=[];
+    byRegion[e.r.id].push(e);
+  });
+  Object.values(byRegion).forEach(grp=>{
+    if(grp.length<2)return;
+    grp.forEach(e=>{groupOf[e.key]=grp;});
+    const[cx,cy]=project([grp[0].r.lng,grp[0].r.lat]);
+    const step=(2*Math.PI)/grp.length;
+    grp.forEach((e,k)=>{
+      const a=-Math.PI/2+k*step;
+      renderPos[e.key]=[cx+Math.cos(a)*SPREAD,cy+Math.sin(a)*SPREAD];
     });
-    if(grp.length>1){
-      grp.forEach(gr=>{groupOf[gr.id]=grp;});
-      /* spread pins radially around centroid */
-      const cx=grp.reduce((s,gr)=>s+project([gr.lng,gr.lat])[0],0)/grp.length;
-      const cy=grp.reduce((s,gr)=>s+project([gr.lng,gr.lat])[1],0)/grp.length;
-      const angleStep=(2*Math.PI)/grp.length;
-      const startAngle=-Math.PI/2; /* start top, go clockwise */
-      grp.forEach((gr,k)=>{
-        const a=startAngle+k*angleStep;
-        renderPos[gr.id]=[cx+Math.cos(a)*SPREAD, cy+Math.sin(a)*SPREAD];
-      });
-    }
   });
 }
 function renderMarkers(){
   marksG.innerHTML='';
   if(expandedCluster===null)return;
   const cl=CLUSTERS.find(x=>x.id===expandedCluster);if(!cl)return;
-  const pins=filteredRegions().filter(r=>cl.regions.includes(r.id));
-  computeOverlaps(pins);
-  pins.forEach((r,i)=>{
-    const m=makeMarker(r);
-    m.style.animation=`svgPinIn .35s ease-out ${i*0.07}s both`;
+  const entries=[];
+  filteredRegions().filter(r=>cl.regions.includes(r.id)).forEach(r=>{
+    r.p.forEach(p=>entries.push({r,p,key:r.id+'|'+p}));
+  });
+  computeOverlaps(entries);
+  entries.forEach((entry,i)=>{
+    const m=makeMarker(entry.r,entry.p,entry.key);
+    m.style.animation=`svgPinIn .35s ease-out ${i*0.05}s both`;
     marksG.appendChild(m);
   });
 }
 
 /* ── Tooltip ── */
-function showTip(e,r){
+function showTip(e,r,p){
   const city=(r.name.match(/\(([^)]+)\)/)||[,r.name])[1];
   const rid=r.name.replace(/\s*\(.*\)/,'').trim();
-  const chip=(p)=>'<span class="tip-pchip"><span class="tip-pdot" style="background:'+PROVIDERS[p].color+'"></span>'+PROVIDERS[p].short+'</span>';
-  const provHtml=r.p.map(p=>chip(p)).join('');
+  const chip='<span class="tip-pchip"><span class="tip-pdot" style="background:'+PROVIDERS[p].color+'"></span>'+PROVIDERS[p].short+'</span>';
   const sl=r.sl?'<span class="tip-sl-badge">serverless</span>':'';
   tipEl.innerHTML=
     '<div class="tip-head">'+
-      '<div class="tip-city"><span style="width:9px;height:9px;border-radius:50%;background:'+PROVIDERS[r.p[0]].color+';flex-shrink:0;display:inline-block"></span>'+
+      '<div class="tip-city"><span style="width:9px;height:9px;border-radius:50%;background:'+PROVIDERS[p].color+';flex-shrink:0;display:inline-block"></span>'+
       '<span class="tip-city-name">'+city+'</span>'+sl+'</div>'+
       '<button class="tip-close" onclick="hideTip();stickyTip=null;activeRegion=null;renderSidebar();setActivePinClass(null)">×</button>'+
     '</div>'+
     '<div class="tip-region">'+rid+'</div>'+
     '<div class="tip-body">'+
       '<hr class="tip-divider">'+
-      '<div class="tip-row"><span class="tip-row-label">Provider</span><span class="tip-row-val">'+provHtml+'</span></div>'+
+      '<div class="tip-row"><span class="tip-row-label">Provider</span><span class="tip-row-val">'+chip+'</span></div>'+
       '<div class="tip-row"><span class="tip-row-label">Type</span><span class="tip-row-val">'+(r.sl?'Serverless':'Hosted')+'</span></div>'+
       '<div class="tip-row"><span class="tip-row-label">Geo</span><span class="tip-row-val">'+r.geo.charAt(0).toUpperCase()+r.geo.slice(1)+'</span></div>'+
     '</div>';
@@ -529,8 +525,17 @@ function makeTipSticky(){tipEl.classList.add('sticky');}
 
 /* ── Zoom to region ── */
 function zoomTo(r,mx,my){
-  moveTo(VW/2-mx*2.5,VH/2-my*2.5,2.5,true);
-  activeRegion=r.id;renderSidebar();
+  if(expandedCluster){
+    // in cluster view: zoom to fixed level so it doesn't accumulate
+    const sc=5.0;
+    moveTo(VW/2-mx*sc,VH/2-my*sc,sc,true);
+    activeRegion=r.id;renderSidebar();
+    const fp=r.p[0];
+    if(fp){const k=r.id+'|'+fp;setActivePinClass(k);stickyTip=null;}
+  }else{
+    moveTo(VW/2-mx*2.5,VH/2-my*2.5,2.5,true);
+    activeRegion=r.id;renderSidebar();
+  }
 }
 
 /* ── Sidebar ── */
