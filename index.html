@@ -216,7 +216,7 @@ const REGIONS=[
 /* ── Geographic clusters ── */
 const CLUSTERS=[
   {id:'us-east',   name:'US East',       lat:38.5, lng:-80.5, zoom:3.0, regions:['us-east-1','us-east-2','eastus']},
-  {id:'us-west',   name:'US West',       lat:43.5, lng:-122.2,zoom:3.0, regions:['us-west-1','us-west-2','westus2']},
+  {id:'us-west',   name:'US West',       lat:43.5, lng:-122.2,zoom:3.2, regions:['us-west-1','us-west-2','westus2']},
   {id:'us-central',name:'US Central',    lat:41.8, lng:-93.1, zoom:4.0, regions:['us-central1']},
   {id:'canada',    name:'Canada',        lat:48.3, lng:-93.5, zoom:2.8, regions:['ca-central-1','ca-west-1']},
   {id:'south-am',  name:'South America', lat:-23.5,lng:-46.6, zoom:4.0, regions:['sa-east-1']},
@@ -229,6 +229,16 @@ const CLUSTERS=[
   {id:'australia', name:'Australia',     lat:-33.9,lng:151.2, zoom:4.0, regions:['ap-southeast-2']},
   {id:'ne-asia',   name:'NE Asia',       lat:33.0, lng:130.0, zoom:2.8, regions:['ap-northeast-1','ap-northeast-2','ap-east-1']},
   {id:'s-asia',    name:'S. Asia',       lat:19.1, lng:72.9,  zoom:4.0, regions:['ap-south-1']},
+];
+
+/* ── State-level sub-clusters (shown after expanding US West) ── */
+const STATE_CLUSTERS=[
+  {id:'state-wa',  name:'Washington',    number:4, lat:47.6, lng:-122.3, zoom:5.5,
+   regionIds:['westus2','us-west-2']},
+  {id:'state-or',  name:'Oregon',        number:3, lat:45.5, lng:-122.7, zoom:5.5,
+   regionIds:['us-west-2','us-central1']},
+  {id:'state-ca',  name:'N. California', number:2, lat:37.3, lng:-121.9, zoom:5.5,
+   regionIds:['us-west-1','us-east-1']},
 ];
 const SHORT={aws:'AWS',gcp:'GCP',azure:'Az'};
 let expandedCluster=null;
@@ -315,19 +325,48 @@ function getFilteredClusters(){
   })).filter(c=>c.regions.length>0);
 }
 function positionClusterPins(){
-  if(expandedCluster!==null)return;
   const layer=document.getElementById('cluster-layer');
-  if(!layer)return;
+  if(!layer||layer.style.display==='none')return;
   layer.querySelectorAll('.cpin-wrap').forEach(el=>{
     const mx=parseFloat(el.dataset.mx),my=parseFloat(el.dataset.my);
     const[px,py]=svgToMap(mx,my);
     el.style.left=px+'px';el.style.top=py+'px';
   });
 }
+
+let expandedState=null; // null | state-cluster id
+
 function renderClusterLayer(){
   const layer=document.getElementById('cluster-layer');
   if(!layer)return;
   layer.innerHTML='';
+
+  // Level 3: inside a state — show individual region pins (handled by renderMarkers)
+  if(expandedState!==null){layer.style.display='none';return;}
+
+  // Level 2: US West expanded → show state pins
+  if(expandedCluster==='us-west'){
+    layer.style.display='';
+    STATE_CLUSTERS.forEach((sc,i)=>{
+      const[mx,my]=project([sc.lng,sc.lat]);
+      const[px,py]=svgToMap(mx,my);
+      const wrap=document.createElement('div');
+      wrap.className='cpin-wrap';wrap.dataset.mx=mx;wrap.dataset.my=my;
+      wrap.style.left=px+'px';wrap.style.top=py+'px';
+      const btn=document.createElement('div');
+      btn.className='cpin';btn.textContent=String(sc.number);
+      btn.title=sc.name;
+      btn.style.animation=`cpinIn .32s ease-out ${i*0.06}s both`;
+      const lbl=document.createElement('div');
+      lbl.className='cpin-label';lbl.textContent=sc.name;
+      wrap.appendChild(btn);wrap.appendChild(lbl);
+      btn.addEventListener('click',e=>{e.stopPropagation();expandState(sc);});
+      layer.appendChild(wrap);
+    });
+    return;
+  }
+
+  // Level 1: global — show US West cluster pin only
   if(expandedCluster!==null){layer.style.display='none';return;}
   layer.style.display='';
   getFilteredClusters().forEach((cl,i)=>{
@@ -347,17 +386,62 @@ function renderClusterLayer(){
     layer.appendChild(wrap);
   });
 }
+
 function expandCluster(cl){
   expandedCluster=cl.id;
+  expandedState=null;
   const[mx,my]=project([cl.lng,cl.lat]);
   moveTo(VW/2-mx*cl.zoom,VH/2-my*cl.zoom,cl.zoom,true);
-  document.getElementById('cluster-layer').style.display='none';
   document.getElementById('back-btn').style.display='block';
-  renderMarkers();
+  if(cl.id==='us-west'){
+    renderMarkers();
+    renderClusterLayer(); // render immediately — applyT repositions each frame
+  } else {
+    document.getElementById('cluster-layer').style.display='none';
+    renderMarkersForCluster(cl);
+    renderSidebar();
+  }
 }
+
+function renderMarkersForCluster(cl){
+  marksG.innerHTML='';
+  const entries=[];
+  filteredRegions().filter(r=>cl.regions.includes(r.id)).forEach(r=>{
+    r.p.forEach(p=>entries.push({r,p,key:r.id+'|'+p}));
+  });
+  computeOverlaps(entries);
+  entries.forEach((entry,i)=>{
+    const m=makeMarker(entry.r,entry.p,entry.key);
+    m.style.animation=`svgPinIn .35s ease-out ${i*0.05}s both`;
+    marksG.appendChild(m);
+  });
+}
+
+function expandState(sc){
+  expandedState=sc.id;
+  const[mx,my]=project([sc.lng,sc.lat]);
+  moveTo(VW/2-mx*sc.zoom,VH/2-my*sc.zoom,sc.zoom,true);
+  document.getElementById('cluster-layer').style.display='none';
+  renderMarkers();
+  renderSidebar();
+}
+
 function collapseToGlobal(){
-  expandedCluster=null;stickyTip=null;hideTip();activeRegion=null;
+  if(expandedState!==null){
+    expandedState=null;
+    const cl=CLUSTERS.find(x=>x.id==='us-west');
+    if(cl){
+      const[mx,my]=project([cl.lng,cl.lat]);
+      moveTo(VW/2-mx*cl.zoom,VH/2-my*cl.zoom,cl.zoom,true);
+    }
+    renderMarkers();renderSidebar();
+    setTimeout(renderClusterLayer,50);
+    return;
+  }
+  expandedCluster=null;expandedState=null;stickyTip=null;hideTip();activeRegion=null;
+  marksG.innerHTML='';
   document.getElementById('back-btn').style.display='none';
+  document.getElementById('cluster-layer').style.display='';
   flyTo(activeTab);
   renderMarkers();renderSidebar();
   renderClusterLayer();
@@ -477,10 +561,10 @@ function computeOverlaps(entries){
 }
 function renderMarkers(){
   marksG.innerHTML='';
-  if(expandedCluster===null)return;
-  const cl=CLUSTERS.find(x=>x.id===expandedCluster);if(!cl)return;
+  if(expandedState===null)return; // only show individual pins when inside a state
+  const sc=STATE_CLUSTERS.find(x=>x.id===expandedState);if(!sc)return;
   const entries=[];
-  filteredRegions().filter(r=>cl.regions.includes(r.id)).forEach(r=>{
+  filteredRegions().filter(r=>sc.regionIds.includes(r.id)).forEach(r=>{
     r.p.forEach(p=>entries.push({r,p,key:r.id+'|'+p}));
   });
   computeOverlaps(entries);
@@ -524,27 +608,47 @@ function hideTip(){tipEl.style.display='none';tipEl.classList.remove('sticky');s
 function makeTipSticky(){tipEl.classList.add('sticky');}
 
 /* ── Zoom to region ── */
-function zoomTo(r,mx,my){
-  if(expandedCluster){
-    // in cluster view: zoom to fixed level so it doesn't accumulate
-    const sc=5.0;
-    moveTo(VW/2-mx*sc,VH/2-my*sc,sc,true);
-    activeRegion=r.id;renderSidebar();
-    const fp=r.p[0];
-    if(fp){const k=r.id+'|'+fp;setActivePinClass(k);stickyTip=null;}
-  }else{
-    moveTo(VW/2-mx*2.5,VH/2-my*2.5,2.5,true);
-    activeRegion=r.id;renderSidebar();
+function zoomTo(r,mx,my,provider){
+  activeRegion=r.id;
+  const sc=5.0;
+  moveTo(VW/2-mx*sc,VH/2-my*sc,sc,true);
+
+  // if already in a cluster/state view, re-render those markers
+  if(expandedState){
+    renderMarkers();
+  } else if(expandedCluster && expandedCluster!=='_nav'){
+    const cl=CLUSTERS.find(x=>x.id===expandedCluster);
+    if(cl) renderMarkersForCluster(cl);
+  } else {
+    // nav click from global view — just show this region's pins
+    marksG.innerHTML='';
+    const entries=[];
+    r.p.forEach(p=>entries.push({r,p,key:r.id+'|'+p}));
+    computeOverlaps(entries);
+    entries.forEach((entry,i)=>{
+      const m=makeMarker(entry.r,entry.p,entry.key);
+      marksG.appendChild(m);
+    });
+    document.getElementById('back-btn').style.display='block';
+    document.getElementById('cluster-layer').style.display='none';
+    expandedCluster='_nav';
   }
+
+  renderSidebar();
+  const fp=provider||r.p[0];
+  if(fp){const k=r.id+'|'+fp;setActivePinClass(k);stickyTip=null;}
 }
 
 /* ── Sidebar ── */
 function renderSidebar(){
   const sb=document.getElementById('sidebar');
   const byP={aws:[],gcp:[],azure:[]};
-  /* in expanded cluster view, only show that cluster's regions */
   let regions=filteredRegions();
-  if(expandedCluster){
+  // only filter to cluster/state regions when expanded via map
+  if(expandedState){
+    const sc=STATE_CLUSTERS.find(x=>x.id===expandedState);
+    if(sc)regions=regions.filter(r=>sc.regionIds.includes(r.id));
+  } else if(expandedCluster && expandedCluster!=='_nav'){
     const cl=CLUSTERS.find(x=>x.id===expandedCluster);
     if(cl)regions=regions.filter(r=>cl.regions.includes(r.id));
   }
@@ -554,9 +658,9 @@ function renderSidebar(){
     if(!byP[p].length)return;
     const grp=document.createElement('div');grp.className='acc-group';
     const head=document.createElement('button');head.className='acc-head';
-    const body=document.createElement('div');body.className='acc-body open';
-    head.setAttribute('aria-expanded','true');
-    head.innerHTML='<span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:'+PROVIDERS[p].color+';flex-shrink:0"></span>'+PROVIDERS[p].label+'</span><span class="acc-chevron open" aria-hidden="true">&#8964;</span>';
+    const body=document.createElement('div');body.className='acc-body';
+    head.setAttribute('aria-expanded','false');
+    head.innerHTML='<span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:'+PROVIDERS[p].color+';flex-shrink:0"></span>'+PROVIDERS[p].label+'</span><span class="acc-chevron" aria-hidden="true">&#8964;</span>';
     byP[p].forEach(r=>{
       const row=document.createElement('div');
       row.className='region-row'+(r.id===activeRegion?' active':'');
@@ -566,8 +670,8 @@ function renderSidebar(){
       row.setAttribute('aria-label',r.name+(r.sl?' (serverless)':''));
       row.innerHTML='<span class="rdot" style="background:'+PROVIDERS[p].color+'" aria-hidden="true"></span><span>'+r.name+'</span>'+(r.sl?'<span class="stag">serverless</span>':'');
       const[mx,my]=project([r.lng,r.lat]);
-      row.addEventListener('click',()=>zoomTo(r,mx,my));
-      row.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();zoomTo(r,mx,my);}});
+      row.addEventListener('click',()=>zoomTo(r,mx,my,p));
+      row.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();zoomTo(r,mx,my,p);}});
       body.appendChild(row);
     });
     head.addEventListener('click',()=>{
@@ -583,10 +687,12 @@ function renderSidebar(){
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.querySelectorAll('.tab').forEach(x=>{x.classList.remove('on');x.setAttribute('aria-selected','false');});
   t.classList.add('on');t.setAttribute('aria-selected','true');
-  activeTab=t.dataset.tab;activeRegion=null;hideTip();
-  expandedCluster=null;stickyTip=null;hideTip();
+  activeTab=t.dataset.tab;activeRegion=null;
+  expandedCluster=null;expandedState=null;stickyTip=null;
+  hideTip();marksG.innerHTML='';
   document.getElementById('back-btn').style.display='none';
-  flyTo(activeTab);renderMarkers();renderSidebar();renderClusterLayer();
+  document.getElementById('cluster-layer').style.display='';
+  flyTo(activeTab);renderSidebar();renderClusterLayer();
 }));
 
 /* ── Checkboxes ── */
